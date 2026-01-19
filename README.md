@@ -7,7 +7,7 @@ active `market.orders`. It helps new private servers show a market history immed
 
 ## Install
 ```bash
-npm install @TuEye/screepsmod-market-deals-seeder
+npm install screepsmod-market-deals-seeder
 ```
 
 ## Enable in Screeps server
@@ -15,7 +15,7 @@ Add the mod to your server config (example `config.json`):
 ```json
 {
   "mods": [
-    "@TuEye/screepsmod-market-deals-seeder"
+    "screepsmod-market-deals-seeder"
   ]
 }
 ```
@@ -23,7 +23,7 @@ Add the mod to your server config (example `config.json`):
 If you keep it locally, you can also use a relative or absolute path in `mods`.
 
 ## Configuration
-All settings are inside `market-deals-seed.js` and can be edited directly.
+All settings are inside `index.js` and can be edited directly.
 The mod entry point is `module.exports = function(config)` and uses
 `config.common.storage.db`.
 
@@ -45,5 +45,4 @@ Environment:
 - It runs once at startup and then periodically.
 
 ## Publishing to GitHub Packages
-Update `package.json` with your GitHub scope (replace `@TuEye`).
-Then push a release; the workflow publishes the package to GitHub Packages.
+Publish to npmjs with `npm publish`.
