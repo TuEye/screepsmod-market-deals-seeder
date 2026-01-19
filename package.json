@@ -1,0 +1,36 @@
+{
+  "name": "@TuEye/screepsmod-market-deals-seeder",
+  "version": "0.1.0",
+  "description": "Seeds synthetic market deals to bootstrap market history on Screeps private servers.",
+  "main": "market-deals-seed.js",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TuEye/screepsmod-market-deals-seeder.git"
+  },
+  "keywords": [
+    "screeps",
+    "screepsmod",
+    "market",
+    "private-server",
+    "seed"
+  ],
+  "files": [
+    "market-deals-seed.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
+  "engines": {
+    "node": ">=10"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "screeps_mod": true
+}
