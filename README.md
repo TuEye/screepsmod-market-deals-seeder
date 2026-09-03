@@ -2,8 +2,8 @@
 Seeds synthetic market deals to bootstrap and maintain market history on Screeps private servers.
 
 ## What it does
-This mod inserts synthetic `market.sell` deals into `users.money` using average prices from
-active `market.orders`. It helps new or low-activity private servers provide usable market
+This mod inserts synthetic `market.sell` deals into `users.money` using robust reference prices
+from active `market.orders`. It helps new or low-activity private servers provide usable market
 history to scripts that rely on `Game.market.getHistory()`.
 
 The mod runs as a Screeps backend cronjob, so it is registered only once even though Screeps
@@ -87,10 +87,20 @@ contains enough real activity, no synthetic deals are added for that resource an
 Synthetic timestamps are generated between 10:00 and 18:00 local server time to keep them away
 from day boundaries. On the current day, timestamps are never generated in the future.
 
+## Price selection
+For each resource, the seeder prefers active BUY orders because selling into a BUY order naturally
+produces the `market.sell` history records used by Screeps market statistics.
+
+- Only active orders with a positive finite price and `remainingAmount > 0` are considered.
+- If BUY orders exist, the seeder takes up to the five highest BUY prices and uses their median.
+- If no BUY orders exist, it takes up to the five lowest SELL prices and uses their median instead.
+- If only one to four usable orders exist on the selected side, all available orders are used.
+- If no usable orders exist for a resource, that resource is not seeded.
+- Synthetic deals retain the existing +/-5% price jitter around the selected reference price.
+
 ## Notes
 - Synthetic deals are tagged with `__seededBy: 'market-deals-seed'`.
 - `amountPerDeal` remains 1000 by default so seeded history has meaningful trade volume for scripts that use `Game.market.getHistory().volume`.
-- Price calculation currently uses the average price of active market orders. More robust order-book pricing may be added later.
 - A bootstrap completion marker is written only after a successful bootstrap with usable active market orders.
 
 ## Publishing
