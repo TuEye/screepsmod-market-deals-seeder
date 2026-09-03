@@ -16,6 +16,7 @@ var DEFAULTS = {
 var SEED_TAG = 'market-deals-seed';
 var USER_ID = 'system'; // not a real player
 var PRICE_SCALE = 1000; // Orders are stored in milli-Credits
+var PRICE_ORDER_LIMIT = 5;
 var BOOTSTRAP_MARKER_KEY = 'marketDealsSeeder.bootstrapVersion';
 var BOOTSTRAP_VERSION = 1;
 
@@ -201,28 +202,61 @@ module.exports = function(config) {
     return (typeof n === 'number' && isFinite(n)) ? n : fallback;
   }
 
-  async function calcAvgPricesFromOrders() {
+  function median(values) {
+    if (!values || !values.length) return null;
+
+    var sorted = values.slice().sort(function(a, b) { return a - b; });
+    var middle = Math.floor(sorted.length / 2);
+
+    if (sorted.length % 2) {
+      return sorted[middle];
+    }
+
+    return (sorted[middle - 1] + sorted[middle]) / 2;
+  }
+
+  async function calcReferencePricesFromOrders() {
     var db = getDb();
     var orders = await db['market.orders'].find({ active: true });
-    var mp = {}; // rt -> [prices]
+    var byResource = {}; // rt -> { buy: [prices], sell: [prices] }
 
     (orders || []).forEach(function(o) {
       if (!o || !o.resourceType) return;
+      if (o.type !== 'buy' && o.type !== 'sell') return;
+      if (!(o.remainingAmount > 0)) return;
+
       var p = o.price;
-      if (typeof p !== 'number' || !isFinite(p)) return;
-      if (!mp[o.resourceType]) mp[o.resourceType] = [];
-      mp[o.resourceType].push(p);
+      if (typeof p !== 'number' || !isFinite(p) || p <= 0) return;
+
+      if (!byResource[o.resourceType]) {
+        byResource[o.resourceType] = { buy: [], sell: [] };
+      }
+      byResource[o.resourceType][o.type].push(p);
     });
 
-    var avg = {};
-    Object.keys(mp).forEach(function(rt) {
-      var arr = mp[rt];
-      if (!arr || !arr.length) return;
-      var sum = arr.reduce(function(a, b) { return a + b; }, 0);
-      avg[rt] = sum / arr.length;
+    var referencePrices = {};
+    Object.keys(byResource).forEach(function(rt) {
+      var sides = byResource[rt];
+      var buyPrices = sides.buy
+        .slice()
+        .sort(function(a, b) { return b - a; })
+        .slice(0, PRICE_ORDER_LIMIT);
+      var sellPrices = sides.sell
+        .slice()
+        .sort(function(a, b) { return a - b; })
+        .slice(0, PRICE_ORDER_LIMIT);
+
+      // market.sell history represents the seller side. Prefer competitive
+      // BUY orders because selling into one naturally produces market.sell.
+      // If no BUY order exists, use competitive SELL orders as a fallback.
+      var selected = buyPrices.length ? buyPrices : sellPrices;
+      var referencePrice = median(selected);
+      if (referencePrice != null) {
+        referencePrices[rt] = referencePrice;
+      }
     });
 
-    return avg;
+    return referencePrices;
   }
 
   async function loadDealCounts() {
@@ -255,10 +289,10 @@ module.exports = function(config) {
     return counts;
   }
 
-  async function insertSeedDeal(rt, avgPrice, start, end) {
+  async function insertSeedDeal(rt, referencePrice, start, end) {
     var db = getDb();
     var jitter = 1 + ((Math.random() - 0.5) * 0.10); // +/-5%
-    var raw = safeNumber(avgPrice, 1);
+    var raw = safeNumber(referencePrice, 1);
     var price = (raw / PRICE_SCALE) * jitter;
     var amount = settings.amountPerDeal;
 
@@ -279,25 +313,25 @@ module.exports = function(config) {
   }
 
   async function seedOnce() {
-    var avgPrices = await calcAvgPricesFromOrders();
-    var rts = Object.keys(avgPrices);
+    var referencePrices = await calcReferencePricesFromOrders();
+    var rts = Object.keys(referencePrices);
 
     if (settings.blacklist.length) {
       rts = rts.filter(function(rt) { return settings.blacklist.indexOf(rt) === -1; });
     }
 
     if (!rts.length) {
-      console.log('[market-deals-seed] No avg prices found from active orders; nothing to seed.');
+      console.log('[market-deals-seed] No usable active orders found; nothing to seed.');
       return { resources: 0, inserted: 0, bootstrapReady: false };
     }
 
-    // One 14-day read replaces the previous resource x day count queries.
+    // One history read replaces the previous resource x day count queries.
     var dealCounts = await loadDealCounts();
     var inserted = 0;
 
     for (var ri = 0; ri < rts.length; ri++) {
       var rt = rts[ri];
-      var avg = avgPrices[rt];
+      var referencePrice = referencePrices[rt];
 
       for (var d = 0; d < settings.days; d++) {
         var range = dayRangesLocal(d);
@@ -313,7 +347,7 @@ module.exports = function(config) {
         }
 
         for (var k = 0; k < need; k++) {
-          await insertSeedDeal(rt, avg, range.seedStart, range.seedEnd);
+          await insertSeedDeal(rt, referencePrice, range.seedStart, range.seedEnd);
           inserted++;
         }
       }
