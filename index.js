@@ -1,9 +1,9 @@
 'use strict';
 
 module.exports = function(config) {
-  const db = config && config.common && config.common.storage && config.common.storage.db;
-  if (!db) {
-    console.log('[market-deals-seed] ERROR: config.common.storage.db not available');
+  // Mods are loaded by multiple Screeps processes. Only the backend owns
+  // cronjobs, so registering here prevents duplicate seeders from running.
+  if (!config || !config.backend || !config.cronjobs) {
     return;
   }
 
@@ -22,13 +22,43 @@ module.exports = function(config) {
       .map(function(s){ return s.trim(); })
       .filter(Boolean);
 
-  function dayWindowLocal(daysAgo) {
-      var now = new Date();
-      var base = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo, 0, 0, 0, 0);
-      var start = new Date(base.getTime()); start.setHours(10,0,0,0);
-      var end   = new Date(base.getTime()); end.setHours(18,0,0,0);
-      return { start: start, end: end };
+  function getDb() {
+    var db = config && config.common && config.common.storage && config.common.storage.db;
+    if (!db || !db['market.orders'] || !db['users.money']) {
+      throw new Error('required collections market.orders / users.money are not available');
     }
+    return db;
+  }
+
+  function dayRangesLocal(daysAgo) {
+    var now = new Date();
+    var base = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo, 0, 0, 0, 0);
+
+    // Count real and seeded deals across the complete calendar day.
+    var countStart = new Date(base.getTime());
+    var countEnd = new Date(base.getTime());
+    countEnd.setHours(23, 59, 59, 999);
+    if (countEnd.getTime() > now.getTime()) {
+      countEnd = new Date(now.getTime());
+    }
+
+    // Keep synthetic deal timestamps in the original daytime window, but
+    // never create a timestamp in the future for the current day.
+    var seedStart = new Date(base.getTime());
+    seedStart.setHours(10, 0, 0, 0);
+    var seedEnd = new Date(base.getTime());
+    seedEnd.setHours(18, 0, 0, 0);
+    if (seedEnd.getTime() > now.getTime()) {
+      seedEnd = new Date(now.getTime());
+    }
+
+    return {
+      countStart: countStart,
+      countEnd: countEnd,
+      seedStart: seedStart,
+      seedEnd: seedEnd
+    };
+  }
 
   function randomDateBetween(start, end) {
     var t = start.getTime() + Math.floor(Math.random() * (end.getTime() - start.getTime() + 1));
@@ -39,14 +69,9 @@ module.exports = function(config) {
     return (typeof n === 'number' && isFinite(n)) ? n : fallback;
   }
 
-  function hasCollections() {
-    return !!(db && db['market.orders'] && db['users.money']);
-  }
-
   async function calcAvgPricesFromOrders() {
-    if (!db['market.orders']) return {};
-
-    var orders = await db['market.orders'].find({ active: true }).catch(function() { return []; });
+    var db = getDb();
+    var orders = await db['market.orders'].find({ active: true });
     var mp = {}; // rt -> [prices]
 
     (orders || []).forEach(function(o) {
@@ -69,8 +94,7 @@ module.exports = function(config) {
   }
 
   async function countDeals(rt, start, end) {
-    if (!db['users.money']) return 0;
-
+    var db = getDb();
     var andParts = [
       { type: 'market.sell' },
       { 'market.resourceType': rt },
@@ -82,11 +106,11 @@ module.exports = function(config) {
       andParts.push({ __seededBy: SEED_TAG });
     }
 
-    var docs = await db['users.money'].find({ $and: andParts }).catch(function() { return []; });
-    return (docs || []).length;
+    return db['users.money'].count({ $and: andParts });
   }
 
   async function insertSeedDeal(rt, avgPrice, start, end) {
+    var db = getDb();
     var jitter = 1 + ((Math.random() - 0.5) * 0.10); // +/-5%
     var raw = safeNumber(avgPrice, 1);
     var price = (raw / PRICE_SCALE) * jitter;
@@ -115,7 +139,7 @@ module.exports = function(config) {
     if (BLACKLIST && BLACKLIST.length) {
       rts = rts.filter(function(rt) { return BLACKLIST.indexOf(rt) === -1; });
     }
-      
+
     if (!rts.length) {
       console.log('[market-deals-seed] No avg prices found from active orders; nothing to seed.');
       return { resources: 0, inserted: 0 };
@@ -128,12 +152,19 @@ module.exports = function(config) {
       var avg = avgPrices[rt];
 
       for (var d = 0; d < DAYS; d++) {
-        var range = dayWindowLocal(d);
-        var have = await countDeals(rt, range.start, range.end);
+        var range = dayRangesLocal(d);
+        var have = await countDeals(rt, range.countStart, range.countEnd);
         var need = Math.max(0, MIN_DEALS_PER_DAY - have);
 
+        // Before 10:00 on the current day there is no valid daytime seed
+        // window yet. Existing deals are still counted, but nothing synthetic
+        // is backdated or placed in the future.
+        if (range.seedEnd.getTime() < range.seedStart.getTime()) {
+          continue;
+        }
+
         for (var k = 0; k < need; k++) {
-          await insertSeedDeal(rt, avg, range.start, range.end);
+          await insertSeedDeal(rt, avg, range.seedStart, range.seedEnd);
           inserted++;
         }
       }
@@ -143,32 +174,11 @@ module.exports = function(config) {
     return { resources: rts.length, inserted: inserted };
   }
 
-  function runWithRetry(attempt) {
-    attempt = attempt || 1;
+  config.cronjobs.marketDealsSeed = [RUN_EVERY_MS / 1000, function() {
+    return seedOnce().catch(function(e) {
+      console.log('[market-deals-seed] ERROR', e);
+    });
+  }];
 
-    if (!hasCollections()) {
-      if (attempt === 1) {
-        console.log('[market-deals-seed] waiting for collections: market.orders / users.money ...');
-      }
-      if (attempt <= 60) {
-        return setTimeout(function() { runWithRetry(attempt + 1); }, 1000);
-      }
-      console.log('[market-deals-seed] giving up after 60s; collections still not ready');
-      return;
-    }
-
-    seedOnce()
-      .then(function(r) { console.log('[market-deals-seed] startup seed ok', r); })
-      .catch(function(e) { console.log('[market-deals-seed] ERROR (startup seed)', e); });
-
-    // Periodically retrigger (if another job regularly recalculates/trims the stats)
-    setInterval(function() {
-      seedOnce().catch(function(e) { console.log('[market-deals-seed] ERROR (periodic seed)', e); });
-    }, RUN_EVERY_MS);
-
-    console.log('[market-deals-seed] periodic seeding scheduled every ' + (RUN_EVERY_MS/3600000) + 'h');
-  }
-
-  // Start
-  runWithRetry(1);
+  console.log('[market-deals-seed] backend cronjob scheduled every ' + (RUN_EVERY_MS / 3600000) + 'h');
 };
